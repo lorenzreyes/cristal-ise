@@ -28,6 +28,8 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+
 import org.cristalise.kernel.common.AccessRightsException;
 import org.cristalise.kernel.common.InvalidCollectionModification;
 import org.cristalise.kernel.common.InvalidDataException;
@@ -250,7 +252,12 @@ public class AgentProxy extends ItemProxy {
         params.put(Script.PARAMETER_AGENT, this);
         params.put(Script.PARAMETER_JOB,   job);
 
-        Object returnVal = script.evaluate(item.getPath(), params, job.getStepPath(), true, null);
+        Object returnVal = null;
+        try {
+            returnVal = script.evaluate(item.getPath(), params, job.getStepPath(), true, null).get();
+        } catch ( InterruptedException | ExecutionException ex ) {
+            log.error("returnVal - evaluate(): " , ex );
+        }
 
         // At least one output parameter has to be ErrorInfo, 
         // it is either a single unnamed parameter or a parameter named 'errors'

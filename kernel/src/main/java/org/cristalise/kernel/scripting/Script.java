@@ -31,6 +31,12 @@ import java.io.Writer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.script.Bindings;
 import javax.script.Compilable;
 import javax.script.CompiledScript;
@@ -55,10 +61,7 @@ import org.cristalise.kernel.entity.proxy.ItemProxy;
 import org.cristalise.kernel.graph.model.BuiltInVertexProperties;
 import org.cristalise.kernel.lookup.ItemPath;
 import org.cristalise.kernel.process.Gateway;
-import org.cristalise.kernel.utils.CastorHashMap;
-import org.cristalise.kernel.utils.DescriptionObject;
-import org.cristalise.kernel.utils.FileStringUtility;
-import org.cristalise.kernel.utils.LocalObjectLoader;
+import org.cristalise.kernel.utils.*;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
@@ -88,6 +91,8 @@ public class Script implements DescriptionObject {
     public static final String PARAMETER_STORAGE = "storage";
 
     public static final String SYSTEM_USER       = "system";
+
+    private static final OrderingExecutor executor = new OrderingExecutor( Executors.newCachedThreadPool() ) ;
     
     String         mScript     = "";
     CompiledScript mCompScript = null;
@@ -585,7 +590,12 @@ public class Script implements DescriptionObject {
      * @throws ScriptingEngineException something went wrong during the execution
      */
     public Object evaluate(CastorHashMap inputProps) throws ScriptingEngineException {
-       return evaluate(null, inputProps, null, false, null);
+        try {
+            return evaluate(null, inputProps, null, false, null).get();
+        } catch ( Exception ex ) {
+            log.error( "Script.evaluate", ex );
+            return null;
+        }
     }
 
     /**
@@ -598,7 +608,12 @@ public class Script implements DescriptionObject {
      * @throws ScriptingEngineException
      */
     public Object evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, Object locker) throws ScriptingEngineException {
-        return evaluate(itemPath, inputProps, actContext, false, locker);
+        try {
+            return evaluate(itemPath, inputProps, actContext, false, locker).get();
+        } catch ( Exception ex ) {
+            log.error( "Script.evaluate", ex );
+            return null;
+        }
     }
 
     /**
@@ -610,7 +625,7 @@ public class Script implements DescriptionObject {
      * @param locker transaction locker
      * @return the values returned by the Script
      */
-    public synchronized Object evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, boolean actExecEnv, Object locker) 
+    public Future<Object> evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, boolean actExecEnv, Object locker)
             throws ScriptingEngineException
     {
         try {
@@ -644,12 +659,20 @@ public class Script implements DescriptionObject {
                 setInputParamValue(PARAMETER_LOCKER, locker, true);
             }
 
-            Object retVal = execute();
+            Callable<Object> callableTask = () -> {
+                Object retVal = execute();
 
-            //FIXME I believe (kovax) this line could be deleted - check routing script handling
-            if (retVal == null) retVal = "";
+                //FIXME I believe (kovax) this line could be deleted - check routing script handling
+                if (retVal == null) retVal = "";
 
-            return retVal;
+                return retVal;
+            };
+
+            if ( item == null ) {
+                return executor.submit( callableTask );
+            } else {
+                return executor.submit( callableTask, item.getPath().getUUID().toString() );
+            }
         }
         catch (Exception e) {
             log.error("evaluate() - Script:" + getName(), e);
