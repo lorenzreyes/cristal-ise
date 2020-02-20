@@ -28,7 +28,10 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import org.cristalise.kernel.common.AccessRightsException;
 import org.cristalise.kernel.common.InvalidCollectionModification;
@@ -64,6 +67,7 @@ import org.cristalise.kernel.scripting.ScriptErrorException;
 import org.cristalise.kernel.scripting.ScriptingEngineException;
 import org.cristalise.kernel.utils.CastorHashMap;
 import org.cristalise.kernel.utils.CorbaExceptionUtility;
+import org.cristalise.kernel.utils.OrderingExecutor;
 import org.exolab.castor.mapping.MappingException;
 import org.exolab.castor.xml.MarshalException;
 import org.exolab.castor.xml.ValidationException;
@@ -75,6 +79,8 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class AgentProxy extends ItemProxy {
+
+    private static final OrderingExecutor executor = new OrderingExecutor( ) ;
 
     AgentPath     mAgentPath;
     String        mAgentName;
@@ -145,6 +151,72 @@ public class AgentProxy extends ItemProxy {
         }
     }
 
+    private Future<String> asyncExecute (Job job ) throws ObjectNotFoundException {
+        ItemProxy item = Gateway.getProxyManager().getProxy(job.getItemPath());
+
+        Callable<String> callableTask = () -> {
+            Date startTime = new Date();
+
+            log.info("execute(job) - act:" + job.getStepPath() + " agent:" + mAgentPath.getAgentName());
+
+            if (job.hasScript()) {
+                log.info("execute(job) - executing script");
+                try {
+                    // load script
+                    ErrorInfo scriptErrors = callScript(item, job);
+                    String errorString = scriptErrors.toString();
+                    if (scriptErrors.getFatal()) {
+                        log.error("execute(job) - fatal script errors:{}", scriptErrors);
+                        throw new ScriptErrorException(scriptErrors);
+                    }
+
+                    if (errorString.length() > 0) log.warn("Script errors: {}", errorString);
+                }
+                catch (ScriptingEngineException ex) {
+                    Throwable cause = ex.getCause();
+
+                    if (cause == null) cause = ex;
+
+                    log.error("", ex);
+
+                    throw new InvalidDataException(CorbaExceptionUtility.unpackMessage(cause));
+                }
+            }
+            else if (job.hasQuery() &&  !"Query".equals(job.getActProp(BuiltInVertexProperties.OUTCOME_INIT))) {
+                log.info("execute(job) - executing query (OutcomeInit != Query)");
+
+                job.setOutcome(item.executeQuery(job.getQuery()));
+            }
+
+            // #196: Outcome is validated after script execution, becuase client(e.g. webui)
+            // can submit an incomplete outcome which is made complete by the script
+            if (job.hasOutcome() && job.isOutcomeSet()) job.getOutcome().validateAndCheck();
+
+            job.setAgentPath(mAgentPath);
+
+            if ((boolean)job.getActProp(SIMPLE_ELECTRONIC_SIGNATURE, false)) {
+                executeSimpleElectonicSignature(job);
+            }
+
+            log.info("execute(job) - submitting job to item proxy");
+            String result = item.requestAction(job);
+
+            if (log.isDebugEnabled()) {
+                Date timeNow = new Date();
+                long secsNow = (timeNow.getTime() - startTime.getTime()) / 1000;
+                log.debug("execute(job) - execution DONE in " + secsNow + " seconds");
+            }
+
+            return result;
+        };
+
+        if ( item != null ) {
+            return executor.submit( callableTask, item.getPath().getUUID().toString() );
+        } else {
+            return executor.submit( callableTask );
+        }
+    }
+
     /**
      * Standard execution of jobs. Note that this method should always be the one used from clients.
      * All execution parameters are taken from the job where they're probably going to be correct.
@@ -165,60 +237,11 @@ public class AgentProxy extends ItemProxy {
             throws AccessRightsException, InvalidDataException, InvalidTransitionException, ObjectNotFoundException,
             PersistencyException, ObjectAlreadyExistsException, ScriptErrorException, InvalidCollectionModification
     {
-        ItemProxy item = Gateway.getProxyManager().getProxy(job.getItemPath());
-        Date startTime = new Date();
-
-        log.info("execute(job) - act:" + job.getStepPath() + " agent:" + mAgentPath.getAgentName());
-
-        if (job.hasScript()) {
-            log.info("execute(job) - executing script");
-            try {
-                // load script
-                ErrorInfo scriptErrors = callScript(item, job);
-                String errorString = scriptErrors.toString();
-                if (scriptErrors.getFatal()) {
-                    log.error("execute(job) - fatal script errors:{}", scriptErrors);
-                    throw new ScriptErrorException(scriptErrors);
-                }
-
-                if (errorString.length() > 0) log.warn("Script errors: {}", errorString);
-            }
-            catch (ScriptingEngineException ex) {
-                Throwable cause = ex.getCause();
-
-                if (cause == null) cause = ex;
-
-                log.error("", ex);
-
-                throw new InvalidDataException(CorbaExceptionUtility.unpackMessage(cause));
-            }
+        try {
+            return asyncExecute( job ).get();
+        } catch ( InterruptedException | ExecutionException ex ) {
+            throw new ScriptErrorException( ex.getMessage() );
         }
-        else if (job.hasQuery() &&  !"Query".equals(job.getActProp(BuiltInVertexProperties.OUTCOME_INIT))) {
-            log.info("execute(job) - executing query (OutcomeInit != Query)");
-
-            job.setOutcome(item.executeQuery(job.getQuery()));
-        }
-
-        // #196: Outcome is validated after script execution, becuase client(e.g. webui) 
-        // can submit an incomplete outcome which is made complete by the script
-        if (job.hasOutcome() && job.isOutcomeSet()) job.getOutcome().validateAndCheck();
-
-        job.setAgentPath(mAgentPath);
-
-        if ((boolean)job.getActProp(SIMPLE_ELECTRONIC_SIGNATURE, false)) {
-            executeSimpleElectonicSignature(job);
-        }
-
-        log.info("execute(job) - submitting job to item proxy");
-        String result = item.requestAction(job);
-
-        if (log.isDebugEnabled()) {
-            Date timeNow = new Date();
-            long secsNow = (timeNow.getTime() - startTime.getTime()) / 1000;
-            log.debug("execute(job) - execution DONE in " + secsNow + " seconds");
-        }
-
-        return result;
     }
 
     public void executeSimpleElectonicSignature(Job job)
@@ -252,12 +275,7 @@ public class AgentProxy extends ItemProxy {
         params.put(Script.PARAMETER_AGENT, this);
         params.put(Script.PARAMETER_JOB,   job);
 
-        Object returnVal = null;
-        try {
-            returnVal = script.evaluate(item.getPath(), params, job.getStepPath(), true, null).get();
-        } catch ( InterruptedException | ExecutionException ex ) {
-            log.error("returnVal - evaluate(): " , ex );
-        }
+        Object returnVal = script.evaluate(item.getPath(), params, job.getStepPath(), true, null);
 
         // At least one output parameter has to be ErrorInfo, 
         // it is either a single unnamed parameter or a parameter named 'errors'
@@ -377,33 +395,46 @@ public class AgentProxy extends ItemProxy {
             throws AccessRightsException, InvalidDataException, InvalidTransitionException, ObjectNotFoundException,
             PersistencyException, ObjectAlreadyExistsException, InvalidCollectionModification
     {
-        String schemaName = PredefinedStep.getPredefStepSchemaName(predefStep);
-        String param;
-
-        if (schemaName.equals("PredefinedStepOutcome")) param = PredefinedStep.bundleData(params);
-        else                                            param = params[0];
-
-        String result = item.getItem().requestAction(
-                mAgentPath.getSystemKey(), 
-                "workflow/predefined/" + predefStep, 
-                PredefinedStep.DONE, 
-                param,
-                "",
-                new byte[0]);
-
-        String[] clearCacheSteps = {
-                ChangeName.class.getSimpleName(), 
-                Erase.class.getSimpleName(), 
-                SetAgentPassword.class.getSimpleName(),
-                RemoveC2KObject.class.getSimpleName()
-        };
-
-        if (Arrays.asList(clearCacheSteps).contains(predefStep)) {
-            Gateway.getStorage().clearCache(item.getPath(), null);
-            Gateway.getProxyManager().clearCache(item.getPath());
+        try {
+            return asyncExecute( item, predefStep, params ).get();
+        } catch ( InterruptedException | ExecutionException ex ) {
+            throw new InvalidTransitionException( ex.getMessage() );
         }
+    }
 
-        return result;
+    private Future<String> asyncExecute( ItemProxy item, String predefStep, String...params )
+            throws AccessRightsException, InvalidDataException, InvalidTransitionException, ObjectNotFoundException,
+            PersistencyException, ObjectAlreadyExistsException, InvalidCollectionModification
+    {
+        return executor.submit( () -> {
+            String schemaName = PredefinedStep.getPredefStepSchemaName(predefStep);
+            String param;
+
+            if (schemaName.equals("PredefinedStepOutcome")) param = PredefinedStep.bundleData(params);
+            else                                            param = params[0];
+
+            String result = item.getItem().requestAction(
+                    mAgentPath.getSystemKey(),
+                    "workflow/predefined/" + predefStep,
+                    PredefinedStep.DONE,
+                    param,
+                    "",
+                    new byte[0]);
+
+            String[] clearCacheSteps = {
+                    ChangeName.class.getSimpleName(),
+                    Erase.class.getSimpleName(),
+                    SetAgentPassword.class.getSimpleName(),
+                    RemoveC2KObject.class.getSimpleName()
+            };
+
+            if (Arrays.asList(clearCacheSteps).contains(predefStep)) {
+                Gateway.getStorage().clearCache(item.getPath(), null);
+                Gateway.getProxyManager().clearCache(item.getPath());
+            }
+
+            return result;
+        }, item.getPath().getUUID().toString() );
     }
 
     /**

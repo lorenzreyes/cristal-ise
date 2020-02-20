@@ -35,15 +35,14 @@ import java.util.concurrent.*;
 @Slf4j
 public class OrderingExecutor {
 
-    private ExecutorService executor;
-    private Map<String, Queue<Runnable>> keyedTasks = new HashMap<>();
-    private Semaphore mutex = new Semaphore(1);
+    private static ExecutorService executor = Executors.newCachedThreadPool();
+    private static Map<String, Queue<Runnable>> keyedTasks = new HashMap<>();
+    private static Semaphore mutex = new Semaphore(1);
 
-    public OrderingExecutor(ExecutorService executor) {
-        this.executor = executor;
+    public OrderingExecutor() {
     }
 
-    public <T> Future<T> submit( Callable<T> task ) {
+    public <T> Future<T> submit(Callable<T> task ) {
         return executor.submit( task );
     }
 
@@ -59,16 +58,21 @@ public class OrderingExecutor {
             mutex.acquire();
 
             Queue<Runnable> runnables = keyedTasks.get( key );
-            if ( runnables == null ) {
+
+            boolean uniqueItem = runnables == null;
+            if ( uniqueItem ) {
                 runnables = new LinkedList<>();
                 keyedTasks.put( key, runnables );
-                OrderedTask orderedTask = new OrderedTask( futureTask, runnables, key );
-                runnables.add( orderedTask );
+            }
+
+            OrderedTask orderedTask = new OrderedTask( futureTask, runnables, key );
+
+            if ( uniqueItem ) {
                 executor.execute(orderedTask);
             } else {
-                OrderedTask orderedTask = new OrderedTask( futureTask, runnables, key );
                 runnables.add( orderedTask );
             }
+
         } catch ( InterruptedException ex ) {
             log.error( "OrderingExecutor.submit", ex );
         } finally {

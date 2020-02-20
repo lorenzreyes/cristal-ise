@@ -92,7 +92,7 @@ public class Script implements DescriptionObject {
 
     public static final String SYSTEM_USER       = "system";
 
-    private static final OrderingExecutor executor = new OrderingExecutor( Executors.newCachedThreadPool() ) ;
+    private static final OrderingExecutor executor = new OrderingExecutor( ) ;
     
     String         mScript     = "";
     CompiledScript mCompScript = null;
@@ -581,6 +581,21 @@ public class Script implements DescriptionObject {
         return wasUsed;
     }
 
+    private Future<Object> asyncEvaluate (ItemPath itemPath, CastorHashMap inputProps, String actContext, Object locker)
+            throws ScriptingEngineException
+    {
+        try {
+            if ( itemPath != null && getAllInputParams().containsKey(PARAMETER_ITEM) && getAllInputParams().get(PARAMETER_ITEM) != null ) {
+                ItemProxy item = Gateway.getProxyManager().getProxy(itemPath);
+                return executor.submit( () -> evaluate( item, inputProps, actContext, false, locker ), item.getPath().getUUID().toString() );
+            } else {
+                return executor.submit( () -> evaluate( itemPath, inputProps, actContext, false, locker ) );
+            }
+        } catch ( Exception e ) {
+            log.error("evaluate() - Script:" + getName(), e);
+            throw new ScriptingEngineException(e);
+        }
+    }
 
     /**
      * Use this when a Script is executed without an Item or Transaction context
@@ -591,9 +606,11 @@ public class Script implements DescriptionObject {
      */
     public Object evaluate(CastorHashMap inputProps) throws ScriptingEngineException {
         try {
-            return evaluate(null, inputProps, null, false, null).get();
+            return asyncEvaluate(null, inputProps, null, null).get();
+        } catch ( ScriptingEngineException ex ) {
+            throw ex;
         } catch ( Exception ex ) {
-            log.error( "Script.evaluate", ex );
+            log.error("evaluate() - Script:" + getName(), ex);
             return null;
         }
     }
@@ -609,33 +626,55 @@ public class Script implements DescriptionObject {
      */
     public Object evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, Object locker) throws ScriptingEngineException {
         try {
-            return evaluate(itemPath, inputProps, actContext, false, locker).get();
+            return asyncEvaluate(itemPath, inputProps, actContext, locker).get();
+        } catch ( ScriptingEngineException ex ) {
+            throw ex;
         } catch ( Exception ex ) {
-            log.error( "Script.evaluate", ex );
+            log.error("evaluate() - Script:" + getName(), ex);
             return null;
         }
     }
 
     /**
      * Reads and evaluates input properties, set input parameters from those properties and executes the Script
-     * 
+     *
      * @param itemPath the Item context
      * @param inputProps input properties
      * @param actContext activity path
      * @param locker transaction locker
      * @return the values returned by the Script
      */
-    public Future<Object> evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, boolean actExecEnv, Object locker)
+    public Object evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, boolean actExecEnv, Object locker)
             throws ScriptingEngineException
     {
         try {
             //it is possible to execute a script outside of the context of an Item
             ItemProxy item = itemPath == null ? null : Gateway.getProxyManager().getProxy(itemPath);
+            return evaluate( item, inputProps, actContext, actExecEnv, locker );
+        } catch ( Exception e ) {
+            log.error("evaluate() - Script:" + getName(), e);
+            throw new ScriptingEngineException(e);
+        }
+    }
 
+    /**
+     * Reads and evaluates input properties, set input parameters from those properties and executes the Script
+     * 
+     * @param item the Item Proxy
+     * @param inputProps input properties
+     * @param actContext activity path
+     * @param locker transaction locker
+     * @return the values returned by the Script
+     */
+    public Object evaluate(ItemProxy item, CastorHashMap inputProps, String actContext, boolean actExecEnv, Object locker)
+            throws ScriptingEngineException
+    {
+        try {
             createEmptyContext();
             
             if (actExecEnv) setActExecEnvironment(item, (AgentProxy)inputProps.get(PARAMETER_AGENT), (Job)inputProps.get(PARAMETER_JOB));
 
+            ItemPath itemPath = item == null ? null : item.getPath();
             for (String inputParamName: getAllInputParams().keySet()) {
                 if (inputProps.containsKey(inputParamName)) {
                     setInputParamValue(inputParamName, inputProps.evaluateProperty(itemPath, inputParamName, actContext, locker), true);
@@ -659,20 +698,12 @@ public class Script implements DescriptionObject {
                 setInputParamValue(PARAMETER_LOCKER, locker, true);
             }
 
-            Callable<Object> callableTask = () -> {
-                Object retVal = execute();
+            Object retVal = execute();
 
-                //FIXME I believe (kovax) this line could be deleted - check routing script handling
-                if (retVal == null) retVal = "";
+            //FIXME I believe (kovax) this line could be deleted - check routing script handling
+            if (retVal == null) retVal = "";
 
-                return retVal;
-            };
-
-            if ( item == null ) {
-                return executor.submit( callableTask );
-            } else {
-                return executor.submit( callableTask, item.getPath().getUUID().toString() );
-            }
+            return retVal;
         }
         catch (Exception e) {
             log.error("evaluate() - Script:" + getName(), e);
