@@ -581,15 +581,15 @@ public class Script implements DescriptionObject {
         return wasUsed;
     }
 
-    private Future<Object> asyncEvaluate (ItemPath itemPath, CastorHashMap inputProps, String actContext, Object locker)
+    private Object asyncEvaluate (ItemPath itemPath, CastorHashMap inputProps, String actContext, Object locker)
             throws ScriptingEngineException
     {
         try {
             if ( itemPath != null && getAllInputParams().containsKey(PARAMETER_ITEM) && getAllInputParams().get(PARAMETER_ITEM) != null ) {
                 ItemProxy item = Gateway.getProxyManager().getProxy(itemPath);
-                return executor.submit( () -> evaluate( item, inputProps, actContext, false, locker ), item.getPath().getUUID().toString() );
+                return executor.execute( () -> evaluate( item, inputProps, actContext, false, locker ), item.getPath().getUUID().toString() );
             } else {
-                return executor.submit( () -> evaluate( itemPath, inputProps, actContext, false, locker ) );
+                return executor.execute( () -> evaluate( itemPath, inputProps, actContext, false, locker ) );
             }
         } catch ( Exception e ) {
             log.error("evaluate() - Script:" + getName(), e);
@@ -605,14 +605,7 @@ public class Script implements DescriptionObject {
      * @throws ScriptingEngineException something went wrong during the execution
      */
     public Object evaluate(CastorHashMap inputProps) throws ScriptingEngineException {
-        try {
-            return asyncEvaluate(null, inputProps, null, null).get();
-        } catch ( ScriptingEngineException ex ) {
-            throw ex;
-        } catch ( Exception ex ) {
-            log.error("evaluate() - Script:" + getName(), ex);
-            return null;
-        }
+        return asyncEvaluate(null, inputProps, null, null);
     }
 
     /**
@@ -625,14 +618,7 @@ public class Script implements DescriptionObject {
      * @throws ScriptingEngineException
      */
     public Object evaluate(ItemPath itemPath, CastorHashMap inputProps, String actContext, Object locker) throws ScriptingEngineException {
-        try {
-            return asyncEvaluate(itemPath, inputProps, actContext, locker).get();
-        } catch ( ScriptingEngineException ex ) {
-            throw ex;
-        } catch ( Exception ex ) {
-            log.error("evaluate() - Script:" + getName(), ex);
-            return null;
-        }
+        return asyncEvaluate(itemPath, inputProps, actContext, locker);
     }
 
     /**

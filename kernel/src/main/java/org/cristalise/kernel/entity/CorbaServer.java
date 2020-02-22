@@ -58,6 +58,7 @@ public class CorbaServer {
             throw new CannotManageException("Error initialising POA " + ex.getMessage());
         }
 
+        System.setProperty("server.name", "module");
         new Thread(new Runnable() {
             @Override
             public void run() {

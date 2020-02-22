@@ -29,9 +29,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 import org.cristalise.kernel.common.AccessRightsException;
 import org.cristalise.kernel.common.InvalidCollectionModification;
@@ -151,7 +148,7 @@ public class AgentProxy extends ItemProxy {
         }
     }
 
-    private Future<String> asyncExecute (Job job ) throws ObjectNotFoundException {
+    private String asyncExecute (Job job ) throws ObjectNotFoundException, ScriptErrorException {
         ItemProxy item = Gateway.getProxyManager().getProxy(job.getItemPath());
 
         Callable<String> callableTask = () -> {
@@ -210,10 +207,14 @@ public class AgentProxy extends ItemProxy {
             return result;
         };
 
-        if ( item != null ) {
-            return executor.submit( callableTask, item.getPath().getUUID().toString() );
-        } else {
-            return executor.submit( callableTask );
+        try {
+            if ( item != null ) {
+                return executor.execute( callableTask, item.getPath().getUUID().toString() );
+            } else {
+                return executor.execute( callableTask );
+            }
+        } catch ( Exception ex ) {
+            throw new ScriptErrorException( ex.getMessage() );
         }
     }
 
@@ -237,11 +238,7 @@ public class AgentProxy extends ItemProxy {
             throws AccessRightsException, InvalidDataException, InvalidTransitionException, ObjectNotFoundException,
             PersistencyException, ObjectAlreadyExistsException, ScriptErrorException, InvalidCollectionModification
     {
-        try {
-            return asyncExecute( job ).get();
-        } catch ( InterruptedException | ExecutionException ex ) {
-            throw new ScriptErrorException( ex.getMessage() );
-        }
+        return asyncExecute( job );
     }
 
     public void executeSimpleElectonicSignature(Job job)
@@ -395,46 +392,48 @@ public class AgentProxy extends ItemProxy {
             throws AccessRightsException, InvalidDataException, InvalidTransitionException, ObjectNotFoundException,
             PersistencyException, ObjectAlreadyExistsException, InvalidCollectionModification
     {
-        try {
-            return asyncExecute( item, predefStep, params ).get();
-        } catch ( InterruptedException | ExecutionException ex ) {
-            throw new InvalidTransitionException( ex.getMessage() );
-        }
+        return asyncExecute( item, predefStep, params );
     }
 
-    private Future<String> asyncExecute( ItemProxy item, String predefStep, String...params )
+    private String asyncExecute( ItemProxy item, String predefStep, String...params )
             throws AccessRightsException, InvalidDataException, InvalidTransitionException, ObjectNotFoundException,
             PersistencyException, ObjectAlreadyExistsException, InvalidCollectionModification
     {
-        return executor.submit( () -> {
-            String schemaName = PredefinedStep.getPredefStepSchemaName(predefStep);
-            String param;
+        try {
+            Callable<String> callableTask = () -> {
+                String schemaName = PredefinedStep.getPredefStepSchemaName(predefStep);
+                String param;
 
-            if (schemaName.equals("PredefinedStepOutcome")) param = PredefinedStep.bundleData(params);
-            else                                            param = params[0];
+                if (schemaName.equals("PredefinedStepOutcome")) param = PredefinedStep.bundleData(params);
+                else                                            param = params[0];
 
-            String result = item.getItem().requestAction(
-                    mAgentPath.getSystemKey(),
-                    "workflow/predefined/" + predefStep,
-                    PredefinedStep.DONE,
-                    param,
-                    "",
-                    new byte[0]);
+                String result = item.getItem().requestAction(
+                        mAgentPath.getSystemKey(),
+                        "workflow/predefined/" + predefStep,
+                        PredefinedStep.DONE,
+                        param,
+                        "",
+                        new byte[0]);
 
-            String[] clearCacheSteps = {
-                    ChangeName.class.getSimpleName(),
-                    Erase.class.getSimpleName(),
-                    SetAgentPassword.class.getSimpleName(),
-                    RemoveC2KObject.class.getSimpleName()
+                String[] clearCacheSteps = {
+                        ChangeName.class.getSimpleName(),
+                        Erase.class.getSimpleName(),
+                        SetAgentPassword.class.getSimpleName(),
+                        RemoveC2KObject.class.getSimpleName()
+                };
+
+                if (Arrays.asList(clearCacheSteps).contains(predefStep)) {
+                    Gateway.getStorage().clearCache(item.getPath(), null);
+                    Gateway.getProxyManager().clearCache(item.getPath());
+                }
+
+                return result;
             };
 
-            if (Arrays.asList(clearCacheSteps).contains(predefStep)) {
-                Gateway.getStorage().clearCache(item.getPath(), null);
-                Gateway.getProxyManager().clearCache(item.getPath());
-            }
-
-            return result;
-        }, item.getPath().getUUID().toString() );
+            return executor.execute( callableTask, item.getPath().getUUID().toString() );
+        } catch ( Exception ex ) {
+            throw new InvalidTransitionException( ex.getMessage() );
+        }
     }
 
     /**

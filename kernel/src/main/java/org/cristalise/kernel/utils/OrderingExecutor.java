@@ -22,10 +22,7 @@ package org.cristalise.kernel.utils;
 
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Map;
-import java.util.Queue;
+import java.util.*;
 import java.util.concurrent.*;
 
 /**
@@ -35,30 +32,54 @@ import java.util.concurrent.*;
 @Slf4j
 public class OrderingExecutor {
 
-    private static ExecutorService executor = Executors.newCachedThreadPool();
-    private static Map<String, Queue<Runnable>> keyedTasks = new HashMap<>();
-    private static Semaphore mutex = new Semaphore(1);
+    private static final ExecutorService executor = Executors.newCachedThreadPool();
+    private static final ConcurrentHashMap<String, Queue<Runnable>> keyedTasks = new ConcurrentHashMap<>();
+    private static final Semaphore mutex = new Semaphore(1);
+    private static final Vector<Long> activeThreads = new Vector<>();
 
     public OrderingExecutor() {
     }
 
-    public <T> Future<T> submit(Callable<T> task ) {
-        return executor.submit( task );
+    private Boolean isSubTask () {
+        try {
+            mutex.acquire();
+            return (activeThreads.contains( Thread.currentThread().getId() ))
+                        || (System.getProperty("server.name") == "module");
+        } catch ( InterruptedException ex ) {
+            log.error( "OrderingExecutor.isSubTask", ex );
+        } finally {
+            mutex.release();
+        }
+        return false;
     }
 
-    public <T> Future<T> submit(Callable<T> task, String key) {
+    public void run ( Runnable runnable, String threadName ) {
+        OrderedTask orderedTask = new OrderedTask( runnable, threadName );
+        executor.execute(orderedTask);
+    }
 
-        if (task == null) throw new NullPointerException();
-        if ( key == null ) {
+    public <T> T execute ( Callable<T> task, String key ) throws Exception {
+        if ( isSubTask() ) {
+            return task.call();
+        }
+        return submit( task, key ).get();
+    }
+
+    public <T> T execute ( Callable<T> task ) throws Exception {
+        return executor.submit( task ).get();
+    }
+
+    private <T> Future<T> submit(Callable<T> task, String key) {
+        if ( task == null ) {
+            throw new NullPointerException();
+        } else if ( key == null ) {
             return executor.submit( task );
         }
 
-        RunnableFuture<T> futureTask = new FutureTask<T>(task);
+        RunnableFuture<T> futureTask = new FutureTask<>(task);
         try {
             mutex.acquire();
-
             Queue<Runnable> runnables = keyedTasks.get( key );
-
             boolean uniqueItem = runnables == null;
             if ( uniqueItem ) {
                 runnables = new LinkedList<>();
@@ -66,13 +87,11 @@ public class OrderingExecutor {
             }
 
             OrderedTask orderedTask = new OrderedTask( futureTask, runnables, key );
-
             if ( uniqueItem ) {
-                executor.execute(orderedTask);
+                executor.execute( orderedTask );
             } else {
                 runnables.add( orderedTask );
             }
-
         } catch ( InterruptedException ex ) {
             log.error( "OrderingExecutor.submit", ex );
         } finally {
@@ -80,15 +99,20 @@ public class OrderingExecutor {
         }
 
         return futureTask;
-
     }
 
-    class OrderedTask implements Runnable{
+    class OrderedTask implements Runnable {
 
-        private final Queue<Runnable> dependencyQueue;
-        private final Runnable task;
-        private final Object key;
+        private Queue<Runnable> dependencyQueue;
+        private Runnable task;
+        private Object key;
 
+        private String threadName;
+
+        public OrderedTask(Runnable task, String threadName) {
+            this.task = task;
+            this.threadName = threadName;
+        }
 
         public OrderedTask(Runnable task, Queue<Runnable> dependencyQueue, Object key) {
             this.task = task;
@@ -98,16 +122,33 @@ public class OrderingExecutor {
 
         @Override
         public void run() {
+            Long currentThread = Thread.currentThread().getId();
             try{
+                try {
+                    mutex.acquire();
+                    activeThreads.add( currentThread );
+                } catch ( InterruptedException ex ) {
+                    log.error( "OrderingExecutor.run", ex );
+                } finally {
+                    mutex.release();
+                }
+
+                if ( threadName != null ) {
+                    Thread.currentThread().setName( threadName );
+                }
                 task.run();
             } finally {
                 Runnable nextTask = null;
                 try {
                     mutex.acquire();
-                    if (dependencyQueue.isEmpty()){
-                        keyedTasks.remove(key);
-                    }else{
-                        nextTask = dependencyQueue.poll();
+                    activeThreads.remove( currentThread );
+
+                    if ( dependencyQueue != null ) {
+                        if (dependencyQueue.isEmpty()){
+                            keyedTasks.remove(key);
+                        }else{
+                            nextTask = dependencyQueue.poll();
+                        }
                     }
                 } catch ( InterruptedException ex ) {
                     log.error( "OrderingExecutor.run", ex );
