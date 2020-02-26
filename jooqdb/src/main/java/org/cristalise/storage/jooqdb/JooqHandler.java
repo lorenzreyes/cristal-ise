@@ -192,7 +192,7 @@ public abstract class JooqHandler {
             config.setPassword(pwd);
             config.setAutoCommit(autoCommit);
             config.setReadOnly(readOnlyDataSource);
-            config.setMaximumPoolSize(50);
+            config.setMaximumPoolSize(10);
             config.setMaxLifetime(60000);
             config.setMinimumIdle(10);
             config.setIdleTimeout(30000);
